@@ -9,12 +9,18 @@ const projectSelect = document.getElementById("projectSelect");
 
 let extractedContent = "";
 let pageUrl = "";
+let sessionToken = "";
+
+function authHeaders(extra = {}) {
+  return { "X-LLM-Wiki-Token": sessionToken, ...extra };
+}
 
 async function checkConnection() {
   try {
     const res = await fetch(`${API_URL}/status`, { method: "GET" });
     const data = await res.json();
     if (data.ok) {
+      sessionToken = data.token || "";
       statusBar.className = "status connected";
       statusBar.textContent = "✓ Connected to LLM Wiki";
       await loadProjects();
@@ -30,7 +36,10 @@ async function checkConnection() {
 
 async function loadProjects() {
   try {
-    const res = await fetch(`${API_URL}/projects`, { method: "GET" });
+    const res = await fetch(`${API_URL}/projects`, {
+      method: "GET",
+      headers: authHeaders(),
+    });
     const data = await res.json();
     if (data.ok && data.projects?.length > 0) {
       projectSelect.innerHTML = "";
@@ -46,7 +55,10 @@ async function loadProjects() {
   } catch {}
   // Fallback to current project
   try {
-    const res = await fetch(`${API_URL}/project`, { method: "GET" });
+    const res = await fetch(`${API_URL}/project`, {
+      method: "GET",
+      headers: authHeaders(),
+    });
     const data = await res.json();
     if (data.ok && data.path) {
       const name = data.path.replace(/\\/g, "/").split("/").pop() || data.path;
@@ -214,7 +226,7 @@ async function sendClip() {
   try {
     const res = await fetch(`${API_URL}/clip`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: authHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({
         title: titleInput.value,
         url: pageUrl,

@@ -1,11 +1,34 @@
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::OnceLock;
 use std::thread;
+use rand::Rng;
 use tiny_http::{Header, Method, Response, Server};
 
 static CURRENT_PROJECT: Mutex<String> = Mutex::new(String::new());
 static ALL_PROJECTS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new()); // (name, path)
 static PENDING_CLIPS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new()); // (projectPath, filePath)
+
+/// Session token generated once at startup; shared across server restarts.
+static SESSION_TOKEN: OnceLock<String> = OnceLock::new();
+
+fn session_token() -> &'static str {
+    SESSION_TOKEN.get_or_init(|| {
+        rand::thread_rng()
+            .sample_iter(rand::distributions::Alphanumeric)
+            .take(32)
+            .map(char::from)
+            .collect()
+    })
+}
+
+/// Returns true only for browser-extension origins that cannot be spoofed by
+/// a normal web page: chrome-extension://, moz-extension://, safari-web-extension://.
+fn is_allowed_origin(origin: &str) -> bool {
+    origin.starts_with("chrome-extension://")
+        || origin.starts_with("moz-extension://")
+        || origin.starts_with("safari-web-extension://")
+}
 
 /// Daemon status: 0=starting, 1=running, 2=port_conflict, 3=error
 static DAEMON_STATUS: AtomicU8 = AtomicU8::new(0);
@@ -71,12 +94,43 @@ pub fn start_clip_server() {
             println!("[Clip Server] Listening on http://127.0.0.1:{}", PORT);
 
         for mut request in server.incoming_requests() {
-            let cors_headers = vec![
-                Header::from_bytes("Access-Control-Allow-Origin", "*").unwrap(),
+            // --- CORS: derive Access-Control-Allow-Origin from the request's
+            // Origin header, accepting only browser-extension schemes.
+            let request_origin = request
+                .headers()
+                .iter()
+                .find(|h| h.field.equiv("Origin"))
+                .map(|h| h.value.as_str().to_string());
+
+            let allowed = request_origin
+                .as_deref()
+                .map(is_allowed_origin)
+                .unwrap_or(false);
+
+            // Build the CORS headers once per request.
+            let mut cors_headers: Vec<Header> = Vec::new();
+            if allowed {
+                let origin = request_origin.as_deref().unwrap_or("");
+                cors_headers.push(
+                    Header::from_bytes("Access-Control-Allow-Origin", origin).unwrap(),
+                );
+                cors_headers.push(
+                    Header::from_bytes("Vary", "Origin").unwrap(),
+                );
+            }
+            cors_headers.push(
                 Header::from_bytes("Access-Control-Allow-Methods", "GET, POST, OPTIONS").unwrap(),
-                Header::from_bytes("Access-Control-Allow-Headers", "Content-Type").unwrap(),
+            );
+            cors_headers.push(
+                Header::from_bytes(
+                    "Access-Control-Allow-Headers",
+                    "Content-Type, X-LLM-Wiki-Token",
+                )
+                .unwrap(),
+            );
+            cors_headers.push(
                 Header::from_bytes("Content-Type", "application/json").unwrap(),
-            ];
+            );
 
             // Handle CORS preflight
             if request.method() == &Method::Options {
@@ -90,9 +144,42 @@ pub fn start_clip_server() {
 
             let url = request.url().to_string();
 
+            // --- Token check: /status is public (extension uses it to fetch
+            // the token on first load); every other endpoint requires the
+            // session token in the X-LLM-Wiki-Token header.
+            let is_status = matches!(
+                (request.method(), url.as_str()),
+                (&Method::Get, "/status")
+            );
+
+            if !is_status {
+                let provided_token = request
+                    .headers()
+                    .iter()
+                    .find(|h| h.field.equiv("X-LLM-Wiki-Token"))
+                    .map(|h| h.value.as_str().to_string());
+                let valid = provided_token
+                    .as_deref()
+                    .map(|t| t == session_token())
+                    .unwrap_or(false);
+                if !valid {
+                    let body = r#"{"ok":false,"error":"Unauthorized"}"#;
+                    let mut response = Response::from_string(body).with_status_code(401);
+                    for h in &cors_headers {
+                        response.add_header(h.clone());
+                    }
+                    let _ = request.respond(response);
+                    continue;
+                }
+            }
+
             match (request.method(), url.as_str()) {
                 (&Method::Get, "/status") => {
-                    let body = r#"{"ok":true,"version":"0.1.0"}"#;
+                    let body = serde_json::json!({
+                        "ok": true,
+                        "version": "0.1.0",
+                        "token": session_token(),
+                    }).to_string();
                     let mut response = Response::from_string(body);
                     for h in &cors_headers {
                         response.add_header(h.clone());

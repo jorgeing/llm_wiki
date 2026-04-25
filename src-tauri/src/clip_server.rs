@@ -9,7 +9,7 @@ static CURRENT_PROJECT: Mutex<String> = Mutex::new(String::new());
 static ALL_PROJECTS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new()); // (name, path)
 static PENDING_CLIPS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new()); // (projectPath, filePath)
 
-/// Session token generated once at startup; shared across server restarts.
+/// Session token generated once at startup; persists for the lifetime of the server process.
 static SESSION_TOKEN: OnceLock<String> = OnceLock::new();
 
 fn session_token() -> &'static str {
@@ -110,7 +110,7 @@ pub fn start_clip_server() {
             // Build the CORS headers once per request.
             let mut cors_headers: Vec<Header> = Vec::new();
             if allowed {
-                let origin = request_origin.as_deref().unwrap_or("");
+                let origin = request_origin.as_deref().expect("allowed is true only when request_origin is Some");
                 cors_headers.push(
                     Header::from_bytes("Access-Control-Allow-Origin", origin).unwrap(),
                 );

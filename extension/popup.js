@@ -21,6 +21,9 @@ async function checkConnection() {
     const data = await res.json();
     if (data.ok) {
       sessionToken = data.token || "";
+      if (!sessionToken) {
+        console.warn("[LLM Wiki] /status response did not include a token; authenticated requests will fail.");
+      }
       statusBar.className = "status connected";
       statusBar.textContent = "✓ Connected to LLM Wiki";
       await loadProjects();
